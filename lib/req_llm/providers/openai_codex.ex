@@ -399,8 +399,12 @@ defmodule ReqLLM.Providers.OpenAICodex do
     provider_opts = provider_options(opts)
     instructions = extract_instructions(context) || ""
 
+    # On the Responses WebSocket transport the server keeps the prior response
+    # in a connection-local cache, so a tool-resume (`function_call_output`)
+    # turn can — and must — carry `previous_response_id` to chain off it. Over
+    # plain HTTP there is no such cache, so keep the #613 drop behavior there.
     body =
-      if tool_resume_body?(body) do
+      if tool_resume_body?(body) and not ws_chain_transport?(provider_opts) do
         Map.delete(body, "previous_response_id")
       else
         body
@@ -449,6 +453,17 @@ defmodule ReqLLM.Providers.OpenAICodex do
   end
 
   defp tool_resume_body?(_), do: false
+
+  # True when this request rides the Responses WebSocket transport, where the
+  # connection-local response cache makes `previous_response_id` valid even on
+  # `function_call_output` (tool-resume) turns. Scopes the #613 strip to HTTP.
+  defp ws_chain_transport?(provider_opts) when is_list(provider_opts),
+    do: Keyword.get(provider_opts, :openai_stream_transport) in [:websocket, "websocket"]
+
+  defp ws_chain_transport?(provider_opts) when is_map(provider_opts),
+    do: Map.get(provider_opts, :openai_stream_transport) in [:websocket, "websocket"]
+
+  defp ws_chain_transport?(_), do: false
 
   defp normalize_stream_event!(%{data: "[DONE]"} = event), do: event
 
@@ -630,6 +645,10 @@ defmodule ReqLLM.Providers.OpenAICodex do
       |> Keyword.put_new(:auth_mode, :oauth)
 
     opts
+    # `:stream_transport` is an internal routing key ReqLLM.Streaming injects on
+    # the WebSocket branch (streaming.ex). It is not a provider option, so drop
+    # it before option-schema validation (`process_stream!`) rejects it.
+    |> Keyword.delete(:stream_transport)
     |> Keyword.put(:provider_options, provider_opts)
     |> Keyword.put_new(:auth_mode, :oauth)
   end
